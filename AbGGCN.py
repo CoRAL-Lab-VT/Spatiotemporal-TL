@@ -61,7 +61,7 @@ dirs = {
 }
 
 # Hyperparameters
-seq_length = 6  # Defined early to prevent NameError
+seq_length = 6 
 
 # I/O & Preprocessing Utilities
 def natural_sort(file_list):
@@ -590,7 +590,6 @@ class GatedGraphConvolution(tf.keras.layers.Layer):
         })
         return config
 
-# Custom Callback to Print Gradient Norm
 class GradientNormCallback(Callback):
     def __init__(self, X_train, y_train, sample_weights, batch_size=4):
         super().__init__()
