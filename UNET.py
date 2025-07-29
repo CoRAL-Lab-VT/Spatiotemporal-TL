@@ -334,7 +334,7 @@ def masked_mae(y_true, y_pred):
     den = tf.reduce_sum(mask, axis=[1, 2, 3]) + 1e-7
     return num / den
 
-# Attention Gate Definition
+# Attention Gate 
 def attention_gate(x, g, inter_channels):
     theta_x = Conv2D(inter_channels, (1, 1), padding='same')(x)
     phi_g = Conv2D(inter_channels, (1, 1), padding='same')(g)
@@ -351,13 +351,12 @@ class ExpandDimsLast(Layer):
     def compute_output_shape(self, input_shape):
         return (*input_shape, 1)
     
-# Attention U-Net Model Definition
+# Attention U-Net Model 
 def build_attention_unet_model(hp, input_tensor):
     filters = hp.Int('base_filters', min_value=64, max_value=128, step=32)
     dropout_rate = hp.Float('dropout_rate', min_value=0.0, max_value=0.3, step=0.1)
-    l2_weight = hp.Choice('l2_weight', [1e-8, 1e-7, 1e-6])
+    l2_weight = hp.Choice('l2_weight', [1e-8, 1e-7, 1e-6, 1e-5, 1e-4])
     
-    # Contracting Path
     c1 = Conv2D(filters, (3, 3), padding='same', kernel_regularizer=regularizers.l2(l2_weight), activation=None)(input_tensor)
     c1 = LayerNormalization()(c1)
     c1 = Activation('relu')(c1)
@@ -393,7 +392,6 @@ def build_attention_unet_model(hp, input_tensor):
     c4 = LayerNormalization()(c4)
     c4 = Activation('relu')(c4)
     
-    # Expansive Path
     u5 = UpSampling2D((2, 2))(c4)
     att_c3 = attention_gate(c3, u5, inter_channels=filters * 4 // 2)
     u5 = Concatenate()([u5, att_c3])
@@ -430,7 +428,7 @@ def build_attention_unet_model(hp, input_tensor):
     outputs = Conv2D(1, (1, 1), activation='linear')(c7)
     return outputs
 
-# ConvLSTM + Attention U-Net Model Definition
+# ConvLSTM + Attention U-Net Model 
 def build_convlstm_unet_model(hp):
     with strategy.scope():
         # 1) data input
@@ -652,7 +650,7 @@ except Exception as e:
     tuner = MyBayesianTuner(
         hypermodel=build_convlstm_unet_model,
         objective='val_loss',
-        max_trials=81,
+        max_trials=50,
         executions_per_trial=1,
         directory=tuner_dir,
         project_name='convlstm_unet_tuning',
