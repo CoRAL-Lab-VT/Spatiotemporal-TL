@@ -282,7 +282,7 @@ wl_norm = np.nan_to_num(0.1 + 0.9*(wl_maps - wl_mn)/(wl_mx - wl_mn), nan=0.0)
 wl_padded = np.pad(wl_norm, ((0,0),(top_pad,pad_h-top_pad),(left_pad,pad_w-left_pad)), mode='reflect')
 mask_nan = np.pad(np.isnan(wl_maps), ((0,0),(top_pad,pad_h-top_pad),(left_pad,pad_w-left_pad)), constant_values=True)
 
-# Masked Spatial Normalization (from Version 3)
+# Masked Spatial Normalization
 mask_padded = mask_nan
 spatial_norm = np.zeros_like(spatial_padded, dtype=np.float32)
 for ch in range(C):
@@ -368,7 +368,7 @@ print("Masked adjacency matrix shape:", adj_matrix.dense_shape)
 
 N = int(adj_matrix.dense_shape[0].numpy())
 
-# Valid mask for graph nodes (from Version 3)
+# Valid mask for graph nodes
 valid_mask = (~mask_nan[0]).astype(np.float32)
 valid_mask_tr = np.tile(valid_mask[None, :, :], (len(Xs_tr), 1, 1))
 valid_mask_val = np.tile(valid_mask[None, :, :], (len(Xs_val), 1, 1))
@@ -624,8 +624,7 @@ def build_model(hp):
             x = Dense(inputs.shape[-1])(x)
             x = LayerNormalization()(x + res)
             return x
-
-        # mask out invalid nodes before the temporal transformer:
+            
         # mask out invalid nodes before the temporal transformer:
         flat_mask        = Lambda(flatten_mask,    name='flat_node_mask')(node_mask)
         key_mask         = Lambda(tile_time_dim,   name='key_mask')(flat_mask)
@@ -911,7 +910,7 @@ train_ds = (
           sample_weights
       ))
       .shuffle(buffer_size=len(X_tr), seed=seed_value)
-      .repeat()                              # infinite repeat
+      .repeat()                              
       .batch(batch_size, drop_remainder=True)
       .prefetch(tf.data.AUTOTUNE)
 )
@@ -926,7 +925,7 @@ val_ds = (
            valid_mask_val),
           y_val_masked
       ))
-      .repeat()                              # infinite repeat
+      .repeat()                              
       .batch(batch_size, drop_remainder=True)
       .prefetch(tf.data.AUTOTUNE)
 )
