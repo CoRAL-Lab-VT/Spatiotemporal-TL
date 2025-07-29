@@ -453,8 +453,7 @@ class CustomAttentionLayer(Layer):
     def compute_output_shape(self, input_shape):
         # (batch, features)
         return (input_shape[0], input_shape[-1])
-
-# — add this in its place —
+        
 @register_keras_serializable(package='Custom', name='StandardCBAM')
 class StandardCBAM(Layer):
     def __init__(self, ratio=8, kernel_size=7, **kwargs):
@@ -798,7 +797,7 @@ def build_model(hp):
         dropout_rate  = hp.Float('dropout_rate', 0.0, 0.3, step=0.1)
         num_gcn_layers= 3
         lstm_units    = hp.Int('lstm_units', 32, 64, step=16)
-        l2_strength   = hp.Choice('l2_strength', [1e-8, 1e-7, 1e-6])
+        l2_strength   = hp.Choice('l2_strength', [1e-8, 1e-7, 1e-6, 1e-5, 1e-4)
 
         # GCN Blocks
         x = water_nodes
@@ -938,7 +937,7 @@ train_ds = (
           sample_weights
       ))
       .shuffle(buffer_size=len(X_tr), seed=seed_value)
-      .repeat()                              # infinite repeat
+      .repeat()                             
       .batch(batch_size, drop_remainder=True)
       .prefetch(tf.data.AUTOTUNE)
 )
@@ -953,7 +952,7 @@ val_ds = (
            valid_mask_val),
           y_val_masked
       ))
-      .repeat()                              # infinite repeat
+      .repeat()                              
       .batch(batch_size, drop_remainder=True)
       .prefetch(tf.data.AUTOTUNE)
 )
@@ -962,7 +961,6 @@ val_ds = (
 steps_per_epoch  = len(X_tr) // batch_size
 validation_steps = len(X_val) // batch_size
 
-# Dictionary of everything needed to reconstruct your model
 custom_objects = {
     # Serializable functions used in Lambda layers
     'slice_static': slice_static,
