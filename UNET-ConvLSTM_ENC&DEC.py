@@ -10,10 +10,9 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
 from tensorflow.keras.utils import register_keras_serializable
-from tensorflow.keras.layers import (
-    Input, Conv2D, MaxPooling2D, UpSampling2D, Concatenate, Dropout, ConvLSTM2D,
-    LayerNormalization, Activation, TimeDistributed, Lambda
-)
+from tensorflow.keras.layers import (Input, Conv2D, MaxPooling2D, UpSampling2D,
+                                     Concatenate, Dropout, ConvLSTM2D, LayerNormalization,
+                                     Activation, TimeDistributed)
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from tensorflow.keras import regularizers
@@ -25,9 +24,7 @@ import shutil
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 tf.keras.backend.clear_session()
 
-# -------------------------------------
-# GPU setup
-# -------------------------------------
+# Configure GPU (if available)
 gpus = tf.config.list_physical_devices('GPU')
 print("Num GPUs Available:", len(gpus))
 if gpus:
@@ -38,25 +35,25 @@ if gpus:
     except RuntimeError as e:
         print(e)
 
-# Multi-GPU strategy
+# Set up multi-GPU strategy
 strategy = tf.distribute.MirroredStrategy()
 print(f"Number of devices: {strategy.num_replicas_in_sync}")
 
-# Output dir
-os.makedirs('UNET_OUTPUTS', exist_ok=True)
+# Create main output directory
+os.makedirs('CONVLSTM_UNET_OUTPUTS', exist_ok=True)
 
-# Reproducibility
+# Set Random Seeds for Reproducibility
 seed_value = 42
 random.seed(seed_value)
 np.random.seed(seed_value)
 tf.random.set_seed(seed_value)
 
-# -------------------------------------
-# Data loading + utilities
-# -------------------------------------
+# -------------------------------
+# Data Loading and Preprocessing
+# -------------------------------
 def natural_sort(file_list):
     def alphanum_key(key):
-        return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', key)]
+        return [int(text) if text.isdigit() else text.lower() for text in re.split('(\d+)', key)]
     return sorted(file_list, key=alphanum_key)
 
 def load_tiff_images(data_dir, feature_name=""):
@@ -159,9 +156,7 @@ def embed_stations_into_grid(station_data, station_masks):
         embedded[..., s] = station_data[:, :, s, np.newaxis, np.newaxis] * station_masks[s]
     return embedded
 
-# -------------------------------------
-# Paths
-# -------------------------------------
+# Define Data Directories
 base_dir = os.getcwd()
 dirs = {
     'atm_pressure':    os.path.join(base_dir, 'atm_pressure'),
@@ -174,9 +169,7 @@ dirs = {
 }
 dem_files = [os.path.join(dirs['dem'], f) for f in ['dem_idw.tif', 'dem_idw2.tif']]
 
-# -------------------------------------
-# Load data
-# -------------------------------------
+# Load and Preprocess Data
 print("Loading spatial features...")
 spatial_data = {}
 for name, path in dirs.items():
@@ -195,19 +188,16 @@ for name, path in dirs.items():
         ], axis=0)
         spatial_data[name] = (dem_array, None, dem1_data[1], dem1_data[2])
 
-# Align CRS
+# Verify CRS and align data
 ref_crs, ref_transform = spatial_data['atm_pressure'][2], spatial_data['atm_pressure'][3]
 for name, (data, _, crs, transform) in spatial_data.items():
     if crs != ref_crs or transform != ref_transform:
         logging.warning(f"CRS/Transform mismatch in {name}. Using reference from atm_pressure.")
 
-spatial_features = np.stack(
-    [spatial_data[n][0] for n in ['atm_pressure', 'wind_speed', 'precipitation', 'river_discharge', 'dem']],
-    axis=-1
-)
+spatial_features = np.stack([spatial_data[n][0] for n in ['atm_pressure', 'wind_speed', 'precipitation', 'river_discharge', 'dem']], axis=-1)
 print(f"Spatial features shape: {spatial_features.shape}")
 
-# WL maps + mask
+# Load water level maps early to get mask
 water_level_maps, wl_filenames = load_water_level_maps(dirs['water_levels'])
 wl_min, wl_max = np.nanmin(water_level_maps), np.nanmax(water_level_maps)
 if wl_max - wl_min == 0:
@@ -216,10 +206,10 @@ water_level_norm = 0.1 + 0.9 * (water_level_maps - wl_min) / (wl_max - wl_min)
 water_level_norm = np.nan_to_num(water_level_norm, nan=0.0)
 mask_nan = np.isnan(water_level_maps)
 
-# Pad to multiples of 8
+# Pad spatial features to be divisible by 8 for U-Net
 timesteps, height, width, channels = spatial_features.shape
 pad_height = (8 - height % 8) if height % 8 else 0
-pad_width  = (8 - width  % 8) if width  % 8 else 0
+pad_width = (8 - width % 8) if width % 8 else 0
 top_pad, left_pad = pad_height // 2, pad_width // 2
 spatial_padded = np.pad(
     spatial_features,
@@ -227,6 +217,7 @@ spatial_padded = np.pad(
     mode='reflect'
 )
 print(f"Padded spatial features shape: {spatial_padded.shape}")
+
 padded_height = spatial_padded.shape[1]
 padded_width  = spatial_padded.shape[2]
 
@@ -246,12 +237,13 @@ for ch in range(channels):
     mn, mx = feat[valid].min(), feat[valid].max()
     normed = 0.1 + 0.9 * (feat - mn) / (mx - mn) if mx > mn else np.full_like(feat, 0.1)
     spatial_norm[..., ch] = np.nan_to_num(normed, nan=0.0)
-    spatial_mins.append(mn); spatial_maxs.append(mx)
+    spatial_mins.append(mn)
+    spatial_maxs.append(mx)
 spatial_mins = np.array(spatial_mins)
 spatial_maxs = np.array(spatial_maxs)
 print(f"Spatial normalized (masked): shape={spatial_norm.shape}, min={np.nanmin(spatial_norm)}, max={np.nanmax(spatial_norm)}")
 
-# Stations
+# Load station data
 station_df, station_coords = load_station_data(dirs['stations'])
 if station_df.isnull().all().any():
     raise ValueError("One or more stations have all NaN values!")
@@ -261,12 +253,11 @@ station_norm_df = 0.1 + 0.9 * (station_df - station_min) / (station_max - statio
 station_norm = station_norm_df.fillna(0.0).values
 num_stations = station_df.shape[1]
 
-# Model input bookkeeping
 seq_length = 6
 num_spatial_features = spatial_norm.shape[-1]
 ch_per_timestep = num_spatial_features + num_stations
 
-# Padded WL targets
+# Padded water levels
 water_level_padded = np.pad(
     water_level_norm,
     ((0, 0), (top_pad, pad_height - top_pad), (left_pad, pad_width - left_pad)),
@@ -274,9 +265,9 @@ water_level_padded = np.pad(
 )
 print(f"Padded water level shape: {water_level_padded.shape}")
 
-# Save stats
+# Save normalization statistics and model parameters
 np.savez(
-    os.path.join('UNET_OUTPUTS', 'norm_stats.npz'),
+    os.path.join('CONVLSTM_UNET_OUTPUTS', 'norm_stats.npz'),
     spatial_mins=spatial_mins,
     spatial_maxs=spatial_maxs,
     station_min=station_min,
@@ -293,74 +284,66 @@ np.savez(
     num_stations=num_stations,
     ch_per_timestep=ch_per_timestep
 )
-print("Normalization statistics saved → UNET_OUTPUTS/norm_stats.npz")
+print("Normalization statistics and model parameters saved to CONVLSTM_UNET_OUTPUTS/norm_stats.npz")
 
-# Map stations & masks
+# Map stations to grid and adjust for padding
 station_grid_indices = map_stations_to_grid(station_coords, ref_transform, water_level_maps.shape[1:])
-adjusted_station_grid_indices = {st: (r + top_pad, c + left_pad) for st, (r, c) in station_grid_indices.items()}
+adjusted_station_grid_indices = {station: (row + top_pad, col + left_pad)
+                                 for station, (row, col) in station_grid_indices.items()}
 station_masks = create_station_masks(adjusted_station_grid_indices, spatial_norm.shape[1:3])
 
-# Sequences
+# Create sequences
 X_spatial, X_station, y_target, y_mask = create_sequences(spatial_norm, station_norm, water_level_padded, mask_nan_padded, seq_length)
 
-# Train/val split
+# Split into 80% train and 20% validation
 total_samples = len(X_spatial)
 train_end = int(0.8 * total_samples)
 X_spatial_train = X_spatial[:train_end]
 X_spatial_val   = X_spatial[train_end:]
 X_station_train = X_station[:train_end]
 X_station_val   = X_station[train_end:]
-y_train = y_target[:train_end]
-y_val   = y_target[train_end:]
-y_mask_train = y_mask[:train_end]
-y_mask_val   = y_mask[train_end:]
+y_train         = y_target[:train_end]
+y_val           = y_target[train_end:]
+y_mask_train    = y_mask[:train_end]
+y_mask_val      = y_mask[train_end:]
 print(f"Train shapes: {X_spatial_train.shape}, {X_station_train.shape}, {y_train.shape}")
-print(f"Val   shapes: {X_spatial_val.shape}, {X_station_val.shape}, {y_val.shape}")
+print(f"Validation shapes: {X_spatial_val.shape}, {X_station_val.shape}, {y_val.shape}")
 
-# Embed stations as sparse grids and concat to spatial channels
+# Embed stations into grid and concatenate with spatial features
 embedded_stations_train = embed_stations_into_grid(X_station_train, station_masks)
 X_spatial_train_combined = np.concatenate([X_spatial_train, embedded_stations_train], axis=-1)
 embedded_stations_val = embed_stations_into_grid(X_station_val, station_masks)
 X_spatial_val_combined = np.concatenate([X_spatial_val, embedded_stations_val], axis=-1)
 print(f"Combined train input shape: {X_spatial_train_combined.shape}")
-print(f"Combined val   input shape: {X_spatial_val_combined.shape}")
+print(f"Combined val input shape: {X_spatial_val_combined.shape}")
 
-# Targets with mask
+# Prepare target data with mask
 y_train_with_mask = np.stack([y_train, (~y_mask_train).astype(np.float32)], axis=-1)
-y_val_with_mask   = np.stack([y_val,   (~y_mask_val).astype(np.float32)],   axis=-1)
-print(f"Training mask valid ratio: {(~y_mask_train).mean():.4f}")
+y_val_with_mask   = np.stack([y_val, (~y_mask_val).astype(np.float32)], axis=-1)
+print(f"Training mask valid ratio: {(~y_mask_train).mean()}")
 
-# -------------------------------------
-# Losses / metrics
-# -------------------------------------
+# -------------------------------
+# Losses & Metrics (masked)
+# -------------------------------
 def masked_mse(y_true, y_pred):
     y_val = y_true[..., 0:1]
-    mask  = y_true[..., 1:2]
-    se  = tf.square(y_pred - y_val)
+    mask = y_true[..., 1:2]
+    se = tf.square(y_pred - y_val)
     num = tf.reduce_sum(se * mask, axis=[1, 2, 3])
-    den = tf.reduce_sum(mask,   axis=[1, 2, 3]) + 1e-7
+    den = tf.reduce_sum(mask, axis=[1, 2, 3]) + 1e-7
     return num / den
 
 def masked_mae(y_true, y_pred):
     y_val = y_true[..., 0:1]
-    mask  = y_true[..., 1:2]
-    ae  = tf.abs(y_pred - y_val)
+    mask = y_true[..., 1:2]
+    ae = tf.abs(y_pred - y_val)
     num = tf.reduce_sum(ae * mask, axis=[1, 2, 3])
-    den = tf.reduce_sum(mask,   axis=[1, 2, 3]) + 1e-7
+    den = tf.reduce_sum(mask, axis=[1, 2, 3]) + 1e-7
     return num / den
 
-# -------------------------------------
-# Attention gate
-# -------------------------------------
-def attention_gate(x, g, inter_channels):
-    theta_x = Conv2D(inter_channels, (1, 1), padding='same')(x)
-    phi_g   = Conv2D(inter_channels, (1, 1), padding='same')(g)
-    add_xg  = tf.keras.layers.add([theta_x, phi_g])
-    act_xg  = Activation('relu')(add_xg)
-    psi     = Conv2D(1, (1, 1), padding='same')(act_xg)
-    alpha   = Activation('sigmoid')(psi)
-    return tf.keras.layers.multiply([x, alpha])
-
+# -------------------------------
+# Helpers: mask expand & attention
+# -------------------------------
 @register_keras_serializable(package='Custom', name='ExpandDimsLast')
 class ExpandDimsLast(Layer):
     def call(self, inputs):
@@ -368,88 +351,87 @@ class ExpandDimsLast(Layer):
     def compute_output_shape(self, input_shape):
         return (*input_shape, 1)
 
-# -------------------------------------
-# Bottleneck ConvLSTM U-Net
-# -------------------------------------
-def conv_block_2d(x, filters, l2_weight, dropout_rate):
-    x = Conv2D(filters, (3,3), padding='same', kernel_regularizer=regularizers.l2(l2_weight))(x)
-    x = LayerNormalization()(x); x = Activation('relu')(x)
-    x = Dropout(dropout_rate)(x)
-    x = Conv2D(filters, (3,3), padding='same', kernel_regularizer=regularizers.l2(l2_weight))(x)
-    x = LayerNormalization()(x); x = Activation('relu')(x)
-    return x
+def td_attention_gate(x, g, inter_channels):
+    """
+    TimeDistributed attention gate for ConvLSTM skip connections.
+    x: encoder feature sequence (B, T, H, W, Cx)
+    g: decoder gating sequence (B, T, H, W, Cg) after upsampling
+    """
+    theta_x = TimeDistributed(Conv2D(inter_channels, (1, 1), padding='same'))(x)
+    phi_g   = TimeDistributed(Conv2D(inter_channels, (1, 1), padding='same'))(g)
+    add     = tf.keras.layers.Add()([theta_x, phi_g])
+    act     = Activation('relu')(add)
+    psi     = TimeDistributed(Conv2D(1, (1, 1), padding='same'))(act)
+    sig     = Activation('sigmoid')(psi)
+    return tf.keras.layers.Multiply()([x, sig])
 
-def td_conv_block(x, filters, l2_weight, dropout_rate):
-    x = TimeDistributed(Conv2D(filters, (3,3), padding='same', kernel_regularizer=regularizers.l2(l2_weight)))(x)
-    x = TimeDistributed(LayerNormalization())(x); x = Activation('relu')(x)
-    x = TimeDistributed(Dropout(dropout_rate))(x)
-    x = TimeDistributed(Conv2D(filters, (3,3), padding='same', kernel_regularizer=regularizers.l2(l2_weight)))(x)
-    x = TimeDistributed(LayerNormalization())(x); x = Activation('relu')(x)
-    return x
-
-def build_bottleneck_convlstm_unet_model(hp):
+# -----------------------------------------
+# ConvLSTM Encoder–Decoder Attention U-Net
+# -----------------------------------------
+def build_convlstm_unet_model(hp):
     with strategy.scope():
-        # Inputs
-        data_in = Input(shape=(seq_length, padded_height, padded_width, ch_per_timestep), name='data_input')
-        mask_in = Input(shape=(padded_height, padded_width), name='mask_input')
+        data_in  = Input(shape=(seq_length, padded_height, padded_width, ch_per_timestep), name='data_input')
+        mask_in  = Input(shape=(padded_height, padded_width), name='mask_input')
         mask_exp = ExpandDimsLast(name='mask_expand')(mask_in)
 
-        # HParams
-        f  = hp.Int('base_filters', min_value=64, max_value=128, step=32)
-        d  = hp.Float('dropout_rate', min_value=0.0, max_value=0.3, step=0.1)
-        l2 = hp.Choice('l2_weight', [1e-8, 1e-7, 1e-6])
+        F   = hp.Int('base_filters', min_value=32, max_value=128, step=32)
+        dr  = hp.Float('dropout_rate', min_value=0.0, max_value=0.3, step=0.1)
+        l2w = hp.Choice('l2_weight', [1e-8, 1e-7, 1e-6])
 
-        # ---------- Encoder (TimeDistributed) ----------
-        c1_seq = td_conv_block(data_in, f, l2, d)                  # (B,T,H,W,f)
-        p1_seq = TimeDistributed(MaxPooling2D((2,2)))(c1_seq)      # (B,T,H/2,W/2,f)
+        # Encoder (keep time)
+        e1 = ConvLSTM2D(F, (3,3), padding='same', return_sequences=True,
+                        kernel_regularizer=regularizers.l2(l2w))(data_in)
+        e1 = LayerNormalization()(e1)
+        e1 = Dropout(dr)(e1)
+        e1 = ConvLSTM2D(F, (3,3), padding='same', return_sequences=True,
+                        kernel_regularizer=regularizers.l2(l2w))(e1)
+        e1 = LayerNormalization()(e1)
+        p1 = TimeDistributed(MaxPooling2D(pool_size=(2,2)))(e1)
 
-        c2_seq = td_conv_block(p1_seq, f*2, l2, d)                 # (B,T,H/2,W/2,2f)
-        p2_seq = TimeDistributed(MaxPooling2D((2,2)))(c2_seq)      # (B,T,H/4,W/4,2f)
+        e2 = ConvLSTM2D(2*F, (3,3), padding='same', return_sequences=True,
+                        kernel_regularizer=regularizers.l2(l2w))(p1)
+        e2 = LayerNormalization()(e2)
+        e2 = Dropout(dr)(e2)
+        e2 = ConvLSTM2D(2*F, (3,3), padding='same', return_sequences=True,
+                        kernel_regularizer=regularizers.l2(l2w))(e2)
+        e2 = LayerNormalization()(e2)
+        p2 = TimeDistributed(MaxPooling2D(pool_size=(2,2)))(e2)
 
-        c3_seq = td_conv_block(p2_seq, f*4, l2, d)                 # (B,T,H/4,W/4,4f)
-        p3_seq = TimeDistributed(MaxPooling2D((2,2)))(c3_seq)      # (B,T,H/8,W/8,4f)
+        # Bottleneck
+        b  = ConvLSTM2D(4*F, (3,3), padding='same', return_sequences=True,
+                        kernel_regularizer=regularizers.l2(l2w))(p2)
+        b  = LayerNormalization()(b)
+        b  = Dropout(dr)(b)
+        b  = ConvLSTM2D(4*F, (3,3), padding='same', return_sequences=True,
+                        kernel_regularizer=regularizers.l2(l2w))(b)
+        b  = LayerNormalization()(b)
 
-        # Bottom (TD convs) to 8f
-        b_seq = TimeDistributed(Conv2D(f*8, (3,3), padding='same', kernel_regularizer=regularizers.l2(l2)))(p3_seq)
-        b_seq = TimeDistributed(LayerNormalization())(b_seq); b_seq = Activation('relu')(b_seq)
-        b_seq = TimeDistributed(Dropout(d))(b_seq)
-        b_seq = TimeDistributed(Conv2D(f*8, (3,3), padding='same', kernel_regularizer=regularizers.l2(l2)))(b_seq)
-        b_seq = TimeDistributed(LayerNormalization())(b_seq); b_seq = Activation('relu')(b_seq)
+        # Decoder (keep time)
+        u3 = TimeDistributed(UpSampling2D(size=(2,2)))(b)
+        a2 = td_attention_gate(e2, u3, inter_channels=max(F, 1))
+        u3 = Concatenate()([u3, a2])
+        d3 = ConvLSTM2D(2*F, (3,3), padding='same', return_sequences=True,
+                        kernel_regularizer=regularizers.l2(l2w))(u3)
+        d3 = LayerNormalization()(d3)
+        d3 = Dropout(dr)(d3)
 
-        # ---------- Temporal fusion at bottleneck ----------
-        x = ConvLSTM2D(filters=f*8, kernel_size=(3,3), padding='same', return_sequences=False)(b_seq)  # (B,H/8,W/8,8f)
-        x = LayerNormalization()(x)
+        u2 = TimeDistributed(UpSampling2D(size=(2,2)))(d3)
+        a1 = td_attention_gate(e1, u2, inter_channels=max(F//2, 1))
+        u2 = Concatenate()([u2, a1])
+        d2 = ConvLSTM2D(F, (3,3), padding='same', return_sequences=True,
+                        kernel_regularizer=regularizers.l2(l2w))(u2)
+        d2 = LayerNormalization()(d2)
 
-        # ---------- Prepare skips (take last timestep) ----------
-        skip1 = Lambda(lambda t: t[:, -1])(c1_seq)   # (B,H,W,f)
-        skip2 = Lambda(lambda t: t[:, -1])(c2_seq)   # (B,H/2,W/2,2f)
-        skip3 = Lambda(lambda t: t[:, -1])(c3_seq)   # (B,H/4,W/4,4f)
+        # Collapse time to 1 frame (predict single map)
+        d_last = ConvLSTM2D(F, (3,3), padding='same', return_sequences=False,
+                            kernel_regularizer=regularizers.l2(l2w))(d2)
+        d_last = LayerNormalization()(d_last)
+        out = Conv2D(1, (1,1), activation='linear')(d_last)
 
-        # ---------- Decoder with attention-gated skips ----------
-        # H/8 -> H/4
-        u5 = UpSampling2D((2,2))(x)
-        att3 = attention_gate(skip3, u5, inter_channels=(f*4)//2)
-        u5 = Concatenate()([u5, att3])
-        c5 = conv_block_2d(u5, f*4, l2, d)
-
-        # H/4 -> H/2
-        u6 = UpSampling2D((2,2))(c5)
-        att2 = attention_gate(skip2, u6, inter_channels=(f*2)//2)
-        u6 = Concatenate()([u6, att2])
-        c6 = conv_block_2d(u6, f*2, l2, d)
-
-        # H/2 -> H
-        u7 = UpSampling2D((2,2))(c6)
-        att1 = attention_gate(skip1, u7, inter_channels=f//2)
-        u7 = Concatenate()([u7, att1])
-        c7 = conv_block_2d(u7, f, l2, d)
-
-        out = Conv2D(1, (1,1), activation='linear')(c7)
-
-        # Mask invalid pixels (forward masking; loss also uses mask)
+        # Apply mask before loss/metrics
         masked_out = tf.keras.layers.Multiply(name='mask_final')([out, mask_exp])
 
-        model = Model(inputs=[data_in, mask_in], outputs=masked_out, name='BottleneckConvLSTM_UNet_Masked')
+        model = Model(inputs=[data_in, mask_in], outputs=masked_out, name='ConvLSTM_EncDec_UNet')
         model.compile(
             optimizer=tf.keras.optimizers.Adam(1e-4),
             loss=masked_mse,
@@ -457,11 +439,57 @@ def build_bottleneck_convlstm_unet_model(hp):
         )
         return model
 
-# -------------------------------------
-# Visualization helper
-# -------------------------------------
+# -------------------------------
+# Custom Tuner
+# -------------------------------
+class MyBayesianTuner(kt.BayesianOptimization):
+    def run_trial(self, trial, *args, **kwargs):
+        early_stp = tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=10,
+            restore_best_weights=True,
+            verbose=1
+        )
+        reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.2,
+            patience=5,
+            min_lr=1e-8,
+            verbose=1
+        )
+        ckpt_dir = os.path.join('CONVLSTM_UNET_OUTPUTS','Models')
+        os.makedirs(ckpt_dir, exist_ok=True)
+        ckpt_full = tf.keras.callbacks.ModelCheckpoint(
+            filepath=os.path.join(ckpt_dir, f'model_{trial.trial_id}.keras'),
+            monitor='val_loss',
+            save_best_only=True,
+            save_weights_only=False,
+            verbose=1
+        )
+        ckpt_weights = tf.keras.callbacks.ModelCheckpoint(
+            filepath=os.path.join(ckpt_dir, f'model_{trial.trial_id}.weights.h5'),
+            monitor='val_loss',
+            save_best_only=True,
+            save_weights_only=True,
+            verbose=1
+        )
+        kwargs['callbacks'] = [early_stp, reduce_lr, ckpt_full, ckpt_weights]
+
+        results = super(MyBayesianTuner, self).run_trial(trial, *args, **kwargs)
+
+        hp_values = trial.hyperparameters.values
+        json_path = os.path.join(ckpt_dir, f'model_{trial.trial_id}.json')
+        with open(json_path, 'w') as fp:
+            json.dump(hp_values, fp, indent=2)
+
+        visualize_trial(trial.trial_id)
+        return results
+
+# -------------------------------
+# Visualization
+# -------------------------------
 def visualize_trial(trial_id):
-    model_fp = os.path.join('UNET_OUTPUTS', 'Models', f'model_{trial_id}.keras')
+    model_fp = os.path.join('CONVLSTM_UNET_OUTPUTS', 'Models', f'model_{trial_id}.keras')
     if not os.path.exists(model_fp):
         return
 
@@ -472,35 +500,37 @@ def visualize_trial(trial_id):
     }
     model = tf.keras.models.load_model(model_fp, custom_objects=custom_objects)
 
-    # predict
     y_pred = model.predict([X_spatial_val_combined, valid_mask_val], batch_size=4)
 
-    # de-normalize
     y_pred_orig = (y_pred[..., 0] - 0.1) / 0.9 * (wl_max - wl_min) + wl_min
     y_val_orig  = (y_val - 0.1) / 0.9 * (wl_max - wl_min) + wl_min
     y_pred_mask = np.where(y_mask_val, np.nan, y_pred_orig)
 
-    vis_dir = os.path.join('UNET_OUTPUTS', 'visualization', f'model_{trial_id}')
+    vis_dir = os.path.join('CONVLSTM_UNET_OUTPUTS', 'visualization', f'model_{trial_id}')
     os.makedirs(vis_dir, exist_ok=True)
 
-    # sample maps
     for i in range(min(2, y_pred.shape[0])):
         fig, axs = plt.subplots(1, 3, figsize=(15,5))
-        axs[0].imshow(y_val_orig[i], cmap='viridis'); axs[0].set_title('Actual')
-        axs[1].imshow(y_pred_mask[i], cmap='viridis'); axs[1].set_title('Predicted')
+        axs[0].imshow(y_val_orig[i], cmap='viridis')
+        axs[0].set_title('Actual')
+        axs[1].imshow(y_pred_mask[i], cmap='viridis')
+        axs[1].set_title('Predicted')
         diff = y_pred_mask[i] - y_val_orig[i]
         vmax = np.nanmax(np.abs(diff))
-        axs[2].imshow(diff, cmap='bwr', vmin=-vmax, vmax=vmax); axs[2].set_title('Difference')
-        for ax in axs: fig.colorbar(ax.images[0], ax=ax, shrink=0.6)
+        axs[2].imshow(diff, cmap='bwr', vmin=-vmax, vmax=vmax)
+        axs[2].set_title('Difference')
+        for ax in axs:
+            fig.colorbar(ax.images[0], ax=ax, shrink=0.6)
         fig.tight_layout()
         fig.savefig(os.path.join(vis_dir, f'prediction_sample_{i}.png'))
         plt.close(fig)
 
-    # station time series
     val_start = train_end
     times = np.arange(val_start + seq_length, val_start + seq_length + len(y_val))
-    num_stations_plot = len(adjusted_station_grid_indices)
-    cols, rows = 3, int(np.ceil(num_stations_plot / 3))
+
+    num_stations_local = len(adjusted_station_grid_indices)
+    cols = 3
+    rows = int(np.ceil(num_stations_local / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(15, 5 * rows), sharex=True)
     axes = axes.flatten()
     for idx, (st, (row, col)) in enumerate(adjusted_station_grid_indices.items()):
@@ -508,19 +538,18 @@ def visualize_trial(trial_id):
         ts_rast = y_val_orig[:, row, col]
         ts_pred = y_pred_mask[:, row, col]
         ax = axes[idx]
-        ax.plot(times, ts_csv,  label='CSV', linestyle='--')
+        ax.plot(times, ts_csv, label='CSV')
         ax.plot(times, ts_rast, label='Raster')
         ax.plot(times, ts_pred, label='Predicted')
         ax.set_title(f'Station {st}')
         if idx == 0:
             ax.legend(loc='upper right')
-    for ax in axes[num_stations_plot:]:
+    for ax in axes[num_stations_local:]:
         fig.delaxes(ax)
     fig.tight_layout()
     fig.savefig(os.path.join(vis_dir, 'all_stations_timeseries.png'))
     plt.close(fig)
 
-    # initial embedding viz
     plt.figure()
     plt.imshow(np.sum(embedded_stations_val[0,0,:,:,:], axis=-1), cmap='viridis')
     plt.title('Initial Station Embeddings Sum (First Timestep)')
@@ -528,95 +557,76 @@ def visualize_trial(trial_id):
     plt.savefig(os.path.join(vis_dir, 'initial_embedding.png'))
     plt.close()
 
-    # try to pull trial history for plotting
+    # Try to export loss history if available
     try:
-        trial = tuner.oracle.get_trial(str(trial_id))
+        trial_obj = tuner.oracle.get_trial(str(trial_id))
         for metric_name in ('val_masked_mse', 'val_loss'):
             try:
-                history = trial.metrics.get_history(metric_name)
+                history = trial_obj.metrics.get_history(metric_name)
                 hist_df = pd.DataFrame(history)
                 break
             except ValueError:
                 continue
         else:
+            print(f"No validation history for trial {trial_id}; skipping plot.")
             return
+
         hist_df.to_csv(os.path.join(vis_dir, 'loss_history.csv'), index=False)
         plt.figure()
         plt.plot(hist_df['epoch'], hist_df['value'])
         plt.title(f'{metric_name} per Epoch')
-        plt.xlabel('Epoch'); plt.ylabel(metric_name)
+        plt.xlabel('Epoch')
+        plt.ylabel(metric_name)
         plt.savefig(os.path.join(vis_dir, 'loss_curve.png'))
         plt.close()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Could not save history for trial {trial_id}: {e}")
 
-# -------------------------------------
+# -------------------------------
 # Datasets
-# -------------------------------------
+# -------------------------------
 batch_size = 4
-valid_mask_train = (~y_mask_train).astype(np.float32)  # (N,H_pad,W_pad)
-valid_mask_val   = (~y_mask_val).astype(np.float32)    # (M,H_pad,W_pad)
+
+valid_mask_train = (~y_mask_train).astype(np.float32)  # (num_train, H_pad, W_pad)
+valid_mask_val   = (~y_mask_val).astype(np.float32)    # (num_val,   H_pad, W_pad)
 
 train_ds = (
-    tf.data.Dataset.from_tensor_slices(((X_spatial_train_combined, valid_mask_train), y_train_with_mask))
+    tf.data.Dataset.from_tensor_slices(
+        ((X_spatial_train_combined, valid_mask_train), y_train_with_mask)
+    )
     .shuffle(buffer_size=len(X_spatial_train_combined), seed=seed_value)
     .repeat()
     .batch(batch_size, drop_remainder=True)
     .prefetch(tf.data.AUTOTUNE)
 )
+
 val_ds = (
-    tf.data.Dataset.from_tensor_slices(((X_spatial_val_combined, valid_mask_val), y_val_with_mask))
+    tf.data.Dataset.from_tensor_slices(
+        ((X_spatial_val_combined, valid_mask_val), y_val_with_mask)
+    )
     .repeat()
     .batch(batch_size, drop_remainder=True)
     .prefetch(tf.data.AUTOTUNE)
 )
 
-steps_per_epoch  = len(X_spatial_train_combined) // batch_size
-validation_steps = len(X_spatial_val_combined)   // batch_size
+steps_per_epoch  = max(1, len(X_spatial_train_combined) // batch_size)
+validation_steps = max(1, len(X_spatial_val_combined)   // batch_size)
 
-# -------------------------------------
-# Tuner
-# -------------------------------------
-class MyBayesianTuner(kt.BayesianOptimization):
-    def run_trial(self, trial, *args, **kwargs):
-        early_stp = tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss', patience=10, restore_best_weights=True, verbose=1
-        )
-        reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss', factor=0.2, patience=5, min_lr=1e-8, verbose=1
-        )
-        ckpt_full = tf.keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join('UNET_OUTPUTS','Models',f'model_{trial.trial_id}.keras'),
-            monitor='val_loss', save_best_only=True, save_weights_only=False, verbose=1
-        )
-        ckpt_weights = tf.keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join('UNET_OUTPUTS','Models',f'model_{trial.trial_id}.weights.h5'),
-            monitor='val_loss', save_best_only=True, save_weights_only=True, verbose=1
-        )
-        kwargs['callbacks'] = [early_stp, reduce_lr, ckpt_full, ckpt_weights]
-        results = super(MyBayesianTuner, self).run_trial(trial, *args, **kwargs)
-
-        # save hp json
-        hp_values = trial.hyperparameters.values
-        json_path = os.path.join('UNET_OUTPUTS','Models', f'model_{trial.trial_id}.json')
-        with open(json_path, 'w') as fp:
-            json.dump(hp_values, fp, indent=2)
-
-        visualize_trial(trial.trial_id)
-        return results
-
-tuner_dir = os.path.join('UNET_OUTPUTS', 'tuner_dir')
-os.makedirs(os.path.join('UNET_OUTPUTS', 'Models'), exist_ok=True)
-os.makedirs(os.path.join('UNET_OUTPUTS', 'visualization'), exist_ok=True)
+# -------------------------------
+# Hyperparameter Tuning
+# -------------------------------
+tuner_dir = os.path.join('CONVLSTM_UNET_OUTPUTS', 'tuner_dir')
+os.makedirs(os.path.join('CONVLSTM_UNET_OUTPUTS', 'Models'), exist_ok=True)
+os.makedirs(os.path.join('CONVLSTM_UNET_OUTPUTS', 'visualization'), exist_ok=True)
 
 try:
     tuner = MyBayesianTuner(
-        hypermodel=build_bottleneck_convlstm_unet_model,
+        hypermodel=build_convlstm_unet_model,
         objective='val_loss',
         max_trials=50,
         executions_per_trial=1,
         directory=tuner_dir,
-        project_name='bottleneck_convlstm_unet_tuning',
+        project_name='convlstm_unet_tuning',
         seed=seed_value,
         overwrite=False
     )
@@ -625,12 +635,12 @@ except Exception as e:
     if os.path.exists(tuner_dir):
         shutil.rmtree(tuner_dir)
     tuner = MyBayesianTuner(
-        hypermodel=build_bottleneck_convlstm_unet_model,
+        hypermodel=build_convlstm_unet_model,
         objective='val_loss',
         max_trials=81,
         executions_per_trial=1,
         directory=tuner_dir,
-        project_name='bottleneck_convlstm_unet_tuning',
+        project_name='convlstm_unet_tuning',
         seed=seed_value,
         overwrite=True
     )
