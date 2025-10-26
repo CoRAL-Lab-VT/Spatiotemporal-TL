@@ -259,8 +259,6 @@ This is computed per-sample, averaged over batch.
 
 ## 🧠 Model 1: ConvLSTM U-Net with Attention Gates (`UNET.py`)
 
-### High-level idea
-
 This model treats the problem like image-to-image translation with temporal context:
 
 - **Encoder:** per-timestep 2D convolutions wrapped in `TimeDistributed` blocks to learn local hydrodynamic structure.  
