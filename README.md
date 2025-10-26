@@ -1,6 +1,6 @@
-# Flood Water Level Forecasting from Remote Sensing + Gauges
+# A Transferable Deep Learning Framework to Propagate Extreme Water Levels from Sparse Tide-Gauges across Spatial Domains
 
-**Spatiotemporal Deep Learning for Gridded Water Level Mapping**
+**Spatiotemporal Deep Learning for Extreme Water Level Mapping**
 
 ## 📌 Overview
 
@@ -16,44 +16,15 @@ Three modeling approaches are provided:
 A U-Net with temporal encoding and attention gating to regress water level at every pixel.
 
 ### 2. ASTGCN / Graph-Temporal Transformer Hybrid (GGCN)
-A graph convolutional network on a dynamic water surface graph, fused with temporal attention and spatial features. (Shown in `GGCN.py`, saved outputs under `ASTGCN_OUTPUTS/`.)
+A graph convolutional network on a dynamic water surface graph, fused with temporal attention and spatial features. 
 
 ### 3. Attention-Boosted GCN + LSTM + CBAM/SAM (AbGGCN)
-An improved graph model with channel/spatial attention (CBAM-like), temporal attention, and sequence modeling. (Shown in `AbGGCN.py`, saved outputs under `GCN_L-SAM_CBAM/`.)
-
+An improved graph model with channel/spatial attention (CBAM), temporal attention, and sequence modeling. 
 All three models share:
 - A consistent preprocessing / normalization pipeline  
 - Sequence-to-one temporal supervision (past `seq_length` frames → next-frame water level map)  
 - Masked loss (only evaluate valid water pixels, ignore land / nodata)  
 - Multi-GPU training via `tf.distribute.MirroredStrategy`
-
----
-
-## 🗂 Repository Layout
-
-```text
-.
-├── UNET.py
-├── GGCN.py
-├── AbGGCN.py
-├── atm_pressure/                # .tif rasters over time
-├── wind_speed/
-├── precipitation/
-├── river_discharge/
-├── DEM/
-│   ├── dem_idw.tif              # DEM version 1
-│   └── dem_idw2.tif             # DEM version 2 (later timesteps)
-├── training_water_level/        # per-station CSVs with x,y,water_level
-├── training_water_level_map/    # target water level rasters (.tif) over time
-├── ASTGCN_OUTPUTS/
-│   ├── Models/
-│   ├── visualization/
-│   └── norm_stats.npz
-├── GCN_L-SAM_CBAM/
-│   └── norm_stats.npz
-└── UNET_OUTPUTS/
-    └── norm_stats.npz
-```
 
 ---
 
@@ -78,7 +49,7 @@ These channels are later stacked into a 5-channel tensor along with DEM.
 
 ### 2. DEM (`DEM/dem_idw.tif`, `DEM/dem_idw2.tif`)
 
-- Elevation is static in space, but two DEM variants are used.  
+- Elevation is static in space for an event, but two or more DEM variants can be used.  
 - The code tiles `dem_idw.tif` for the first `n1=217` timesteps, and `dem_idw2.tif` for the remaining timesteps, then concatenates along time to align with the meteorological data length.
 
 Result: a `(T, H, W)` DEM “timeseries” that matches other inputs.
@@ -214,7 +185,7 @@ We also keep a per-sample mask to weight loss only on valid pixels.
 
 ## 📍 Station Embedding
 
-Sparse gauge readings are critical because the water level raster can have missing/noisy regions. We inject the station information spatially so models learn how gauges influence the full surface.
+Sparse gauge readings are critical for water level propagation. We inject the station information spatially so models learn how gauges influence the spatial domain.
 
 There are two strategies in this repo:
 
@@ -222,7 +193,7 @@ There are two strategies in this repo:
 
 1. Convert each station point `(x,y)` to grid row/col using `rasterio.transform.rowcol`.  
 2. Create one binary mask channel per station (1.0 at that pixel, else 0).  
-3. For each timestep and each station, multiply station value by that mask to “splat” the reading into the raster at the correct location.  
+3. For each timestep and each station, multiply station value by that mask to retain only the reading into the raster at the correct location.  
 4. Concatenate these station maps with the meteorological channels, per timestep.
 
 This produces an input tensor like:
@@ -252,21 +223,13 @@ Each node corresponds to a spatial cell `(i,j)` that is not masked out (i.e. whe
 - Store this as a sparse adjacency matrix `A` (TensorFlow `SparseTensor`).
 
 ### Normalization
-We compute the common GCN normalization:
-
-\[
-\hat{A} = A + I \
-D = \mathrm{degree}(\hat{A}) \
-A_{	ext{norm}} = D^{-1/2} \hat{A} D^{-1/2}
-\]
-
-so message passing is numerically stable.
+We compute the common GCN normalization so message passing is numerically stable.
 
 This adjacency and normalization are reused across all samples because topology is spatially fixed.
 
 ---
 
-## 🎯 Loss Function (Masked MSE / MAE)
+## 🎯 Loss Function (Masked MSE)
 
 All models predict a **continuous water level raster**.
 
@@ -291,8 +254,6 @@ loss = num / den
 ```
 
 This is computed per-sample, averaged over batch.
-
-UNet also defines `masked_mae`.
 
 ---
 
@@ -564,30 +525,6 @@ If you run on older GPUs without good half-precision support, disable that, or y
 
 ---
 
-## 🚀 Where to Go Next
-
-- **Flood forecasting:** Run the pipeline in sliding-window mode to get multi-step forecasts (feed prediction back as pseudo-observation).  
-- **Uncertainty:** Add Monte Carlo Dropout or ensembling.  
-- **Physics priors:** Add slope / flow direction from DEM as edge weights in the adjacency, instead of uniform 8-neighbor connections.  
-- **Online fine-tuning:** Continually update normalization stats and last-layer weights as new events arrive, but be careful: you must keep scaling consistent or retrain from scratch.
-
----
-
-## 📚 Citation / Attribution
-
-If you use this code in a paper or report, please cite the model families:
-
-- **UNet ConvLSTM with Attention Gates for Gridded Water Level Forecasting** (this repo).  
-- **Adaptive Gated Graph Convolution with Temporal Attention for Flood Surface Mapping** (ASTGCN-style, this repo).  
-- **Attention-Boosted Spatiotemporal GCN with CBAM and Bidirectional LSTM for Hydrodynamic Surface Reconstruction** (this repo).  
-
-And please acknowledge:
-- Raster forcing inputs (atmospheric pressure, wind, precipitation, river discharge, DEM)  
-- In-situ gauge networks  
-- Training water level rasters used as supervision  
-
----
-
 ## 📝 Repro Checklist
 
 **Before training:**
@@ -601,4 +538,11 @@ And please acknowledge:
 **After training:**
 - [ ] Best checkpoints saved under the model’s output directory.  
 - [ ] `norm_stats.npz` saved.  
-- [ ] Validation loss/plots look reasonable (no NaN loss).  
+- [ ] Validation loss/plots look reasonable (no NaN loss).
+
+---
+
+## 📚 Reference
+Sakib MS, Muñoz DF, Wahl T. Breaking down annual and tropical cyclone-induced nonlinear interactions in total water levels (2025). Advances in Water Resources. https://doi.org/10.1016/j.advwatres.2025.105108
+
+---
