@@ -541,6 +541,6 @@ If you run on older GPUs without good half-precision support, disable that, or y
 ---
 
 ## 📚 Reference
-Sakib MS, Muñoz DF, Wahl T. Breaking down annual and tropical cyclone-induced nonlinear interactions in total water levels (2025). Advances in Water Resources. https://doi.org/10.1016/j.advwatres.2025.105108
+Daramola, S., Muñoz Pauta, D.F., Sakib S.M., Thurman H., Allen G. 2025. A Transferable Deep Learning Framework to Propagate Extreme Water Levels from Sparse Tide-Gauges across Spatial Domains. Expert Systems with Applications. https://doi.org/10.1016/j.eswa.2025.130222 
 
 ---
